@@ -4,12 +4,16 @@ AI-powered agent that analyzes Azure DevOps build failures and sends actionable 
 
 ## Features
 
-- 🤖 **AI-Powered Analysis**: Uses Semantic Kernel + Ollama (Llama 3.2) for intelligent log analysis
+- 🤖 **AI-Powered Analysis**: Uses Semantic Kernel + Ollama (Llama 3.2) for intelligent log analysis with structured output parsing
 - 🔍 **Full Log Fetching**: Retrieves complete build logs from Azure DevOps REST API
-- 📢 **Teams Notifications**: Sends rich Adaptive Cards to Teams channels
+- 📢 **Teams Notifications**: Sends rich Adaptive Cards with severity indicators (🔴🟠🟡🟢) to Teams channels
 - 🎯 **Smart Filtering**: Only analyzes failures, skips successful builds
-- 🔄 **Deduplication**: Prevents duplicate analysis of the same build
-- 📝 **Build History**: Tracks all processed builds
+- 🔄 **Multi-Tier Deduplication**: In-memory + persistent store-backed duplicate prevention across restarts
+- 📝 **Build History**: Tracks all processed builds with SQLite persistence
+- 🎚️ **LLM-Driven Severity**: Dynamic severity classification (critical/high/medium/low) based on impact
+- 🔧 **Actionable Fix Steps**: Extracts and presents 3-5 specific, copy-paste-ready fix steps
+- 🎨 **Structured Output**: Regex-based parsing extracts error quotes, explanations, and fix steps
+- ⚡ **Optimized Codebase**: Reduced from 660 to ~380 lines while maintaining full functionality
 
 ## Architecture
 
@@ -99,8 +103,11 @@ Interactive mode for manual log analysis.
 
 ```
 Log-Analyzer-Agent/
-├── devops_agent_maf.py    # Main agent code
-├── devops_agent.py         # Legacy version
+├── devops_agent_maf.py    # Main agent (380 lines, optimized)
+├── build_store.py          # SQLite persistence layer
+├── clear_tables.py         # Database maintenance utility
+├── devops_agent.py         # Legacy version (deprecated)
+├── builds.db               # SQLite database (auto-created)
 ├── .env.example            # Environment template
 ├── .env                    # Your credentials (gitignored)
 ├── .gitignore              # Git ignore rules
@@ -112,29 +119,48 @@ Log-Analyzer-Agent/
 ## How It Works
 
 1. **Webhook Reception**: Azure DevOps sends build event to Flask endpoint
-2. **Filtering**: Agent checks if build failed (skips successes)
-3. **Log Fetching**: Retrieves full logs via Azure DevOps REST API
-4. **AI Analysis**: Semantic Kernel orchestrates Ollama LLM to analyze logs
-5. **Insights Generation**: AI extracts error, explains it, and provides 3 fix steps
-6. **Teams Notification**: Posts Adaptive Card with analysis to Teams channel
+2. **Duplicate Check**: Two-tier validation (in-memory + persistent store)
+3. **Log Fetching**: Retrieves full logs via Azure DevOps REST API (up to 3 container logs)
+4. **AI Analysis**: Semantic Kernel orchestrates Ollama LLM with structured prompt
+5. **Structured Parsing**: Regex extracts severity, error quote, explanation, and fix steps
+6. **Persistence**: Saves analysis to SQLite database
+7. **Teams Notification**: Posts Adaptive Card with severity icon and actionable insights
+
+## Analysis Structure
+
+The agent provides structured analysis in this format:
+
+**Severity Classification** (LLM-driven):
+- 🔴 **Critical**: Production-blocking, security issues, data loss
+- 🟠 **High**: Build completely broken, major functionality impaired  
+- 🟡 **Medium**: Partial failures, workarounds available
+- 🟢 **Low**: Minor issues, warnings, cosmetic problems
+
+**Output Components**:
+- **Error Quote**: Exact error message from logs
+- **Explanation**: Root cause analysis (2-3 sentences)
+- **Fix Steps**: 3-5 specific, actionable remediation steps with commands
 
 ## Sample Teams Notification
 
 ```
-🔴 Build Failure Alert: ID 31
-Status: failed
-Timestamp: 2026-01-08 11:29:04
+� Build Failure: MyProject-CI
+Build ID: 52 | Status: failed | Severity: HIGH
+Timestamp: 2026-01-08 15:27:56
 
-AI Analysis:
-The exact error: `exit 1`
-This means the script exited with failure status.
+Error:
+exit 100
 
-Fix steps:
-1. Replace `exit 1` with `exit 0`
-2. Remove unnecessary echo statements
-3. Add meaningful logging before exit
+Explanation:
+The second CmdLine@2 task fails due to exit 100 command which causes 
+the build process to exit with a non-zero status code, indicating failure.
 
-[View Build]
+Fix Steps:
+1. Update the script for the second CmdLine@2 task to remove the exit 100 command
+2. If this task requires specific output or actions, consider using a different task that supports these features
+3. Add proper error handling and logging instead of hard exits
+
+[View Build →]
 ```
 
 ## Configuration
@@ -156,31 +182,54 @@ Edit `devops_agent_maf.py` to customize:
 
 **"Event loop is closed" error**
 
-- Fixed in latest version - event loop is now reused across requests
+- ✅ Fixed in v2.0 - Proper async cleanup with shutdown_asyncgens() and graceful thread handling
 
 **"WARNING: AZURE_DEVOPS_PAT not set"**
 
 - Ensure `.env` file exists with `AZURE_DEVOPS_PAT=your_pat`
-- Run `python-dotenv` is installed: `pip install python-dotenv`
+- Verify `python-dotenv` is installed: `pip install python-dotenv`
+
+**401 Unauthorized on log fetch**
+
+- Check PAT token validity (may be expired)
+- Regenerate PAT with Build (Read) permissions at https://dev.azure.com/[org]/_usersSettings/tokens
 
 **Teams notification not sent**
 
 - Verify `TEAMS_WEBHOOK_URL` is set in `.env`
 - Test webhook URL manually with curl/Postman
+- Check Teams channel webhook is not disabled
 
 **Ollama connection failed**
 
 - Ensure Ollama is running: `ollama serve`
 - Verify model is pulled: `ollama pull llama3.2:3b`
+- Check Ollama is listening on localhost:11434
+
+**Duplicate webhook processing**
+
+- ✅ Now handled by two-tier deduplication (in-memory + persistent store)
+- Old builds are skipped automatically even after server restart
 
 ## Tech Stack
 
-- **Semantic Kernel**: AI orchestration framework
-- **Ollama**: Local LLM runtime
-- **Flask**: Web framework
-- **Ngrok**: Tunnel for webhooks
-- **Azure DevOps REST API**: Log fetching
-- **Microsoft Teams**: Notifications
+- **Semantic Kernel**: AI orchestration framework with structured prompt engineering
+- **Ollama**: Local LLM runtime (llama3.2:3b)
+- **Flask**: Lightweight web framework for webhook handling
+- **SQLite**: Persistent storage for build history and deduplication
+- **Ngrok**: Secure tunnel for webhook delivery
+- **Azure DevOps REST API**: Build log retrieval
+- **Microsoft Teams Adaptive Cards**: Rich notifications
+
+## Recent Improvements (v2.0)
+
+- ✅ **LLM-driven severity classification** - Removed hardcoded severity levels
+- ✅ **Populated fix_steps** - Extracts actionable remediation steps from LLM response
+- ✅ **Enhanced error extraction** - Regex patterns for common error formats
+- ✅ **Store-backed deduplication** - Persistent duplicate prevention across restarts
+- ✅ **Code optimization** - Reduced from 660 to ~380 lines (42% reduction)
+- ✅ **Fixed event loop closure** - Proper async cleanup prevents RuntimeError
+- ✅ **Improved Teams cards** - Severity icons, structured sections, better formatting
 
 ## License
 
