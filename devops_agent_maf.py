@@ -9,11 +9,10 @@ import json
 import re
 import os
 import base64
-import time
-import threading
 from datetime import datetime
 from dataclasses import dataclass, field
 from typing import List
+from threading import Thread
 from semantic_kernel import Kernel
 from semantic_kernel.connectors.ai.ollama import OllamaChatCompletion
 from semantic_kernel.contents import ChatHistory
@@ -48,7 +47,22 @@ class BuildEvent:
 
 app = Flask(__name__)
 store = BuildStore()
-processed_recently = set()
+loop = asyncio.new_event_loop()
+
+def run_event_loop():
+    asyncio.set_event_loop(loop)
+    loop.run_forever()
+
+def _check_auth() -> bool:
+    token = os.environ.get('WEBHOOK_TOKEN')
+    if not token:
+        return True
+    auth_header = request.headers.get('Authorization', '')
+    if auth_header.startswith('Bearer '):
+        return auth_header[7:] == token
+    return request.args.get('token') == token
+
+Thread(target=run_event_loop, daemon=True).start()
 
 print("Initializing SK with OllamaChatCompletion...")
 kernel = Kernel()
@@ -67,26 +81,49 @@ class DevOpsLogAgent:
         headers = {"Authorization": f"Basic {auth}", "Accept": "application/json"}
         
         try:
-            response = requests.get(logs_list_url, headers=headers, timeout=10)
-            if response.status_code != 200:
-                print(f"[ERROR] Log fetch failed: {response.status_code}" + (" (Check PAT token)" if response.status_code == 401 else ""))
+            response = await self._retry_request(logs_list_url, headers.copy(), timeout=10)
+            if not response or response.status_code != 200:
+                print(f"[ERROR] Log fetch failed: {response.status_code if response else 'No response'}" + (" (Check PAT token)" if response and response.status_code == 401 else ""))
                 return json.dumps(resource, indent=2)
             
             logs = response.json().get('value', [])
             main_logs = [log for log in logs if log.get('type') == 'Container'] or logs
-            full_log = ""
             
-            for log in main_logs[:3]:
-                log_content_url = f"https://dev.azure.com/{AZURE_DEVOPS_ORG}/{AZURE_DEVOPS_PROJECT}/_apis/build/builds/{build_id}/logs/{log['id']}?api-version=7.1"
-                headers['Accept'] = "text/plain"
-                content_response = requests.get(log_content_url, headers=headers, timeout=10)
-                if content_response.status_code == 200:
-                    full_log += content_response.text + "\n\n"
+            tasks = [self._fetch_single_log(build_id, log['id'], headers.copy()) for log in main_logs]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            full_log = "".join([r for r in results if isinstance(r, str) and r])
             
             return full_log if full_log else json.dumps(resource, indent=2)
         except Exception as e:
             print(f"[ERROR] Log fetch exception: {str(e)}")
+            store.log_failure(build_id, str(e), "LogFetchError")
             return json.dumps(resource, indent=2)
+    
+    async def _fetch_single_log(self, build_id: str, log_id: int, headers: dict) -> str:
+        url = f"https://dev.azure.com/{AZURE_DEVOPS_ORG}/{AZURE_DEVOPS_PROJECT}/_apis/build/builds/{build_id}/logs/{log_id}?api-version=7.1"
+        headers['Accept'] = "text/plain"
+        try:
+            response = await self._retry_request(url, headers, timeout=10)
+            return response.text + "\n\n" if response and response.status_code == 200 else ""
+        except:
+            return ""
+    
+    async def _retry_request(self, url: str, headers: dict, timeout: int = 30, max_attempts: int = 3):
+        response = None
+        for attempt in range(max_attempts):
+            try:
+                response = await asyncio.to_thread(requests.get, url, headers=headers, timeout=timeout)
+                if response.status_code in [429, 500, 502, 503, 504]:
+                    if attempt < max_attempts - 1:
+                        await asyncio.sleep(2 ** attempt)
+                        continue
+                return response
+            except requests.RequestException as e:
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                raise e
+        return response
     
     async def _analyze_logs(self, event: BuildEvent) -> AnalysisResult:
         if event.status not in ['failed', 'partiallySucceeded']:
@@ -278,26 +315,23 @@ def home():
 
 @app.route('/analyze', methods=['POST'])
 def webhook():
+    if not _check_auth():
+        return jsonify({"error": "Unauthorized"}), 401
+    
     data = request.get_json(force=True)
     build_id = str(data.get('resource', {}).get('id', 'unknown'))
     print(f"\n{'='*60}\n[WEBHOOK] Build {build_id}\n{'='*60}")
     
-    if build_id in processed_recently:
-        return jsonify({"status": "skipped", "reason": "duplicate_in_memory"}), 200
+    if store.is_recently_processed(build_id, ttl_seconds=300):
+        return jsonify({"status": "skipped", "reason": "duplicate_ttl"}), 200
     if store.has_build(build_id):
         return jsonify({"status": "skipped", "reason": "duplicate_in_store"}), 200
     
-    processed_recently.add(build_id)
-    if len(processed_recently) > 20:
-        processed_recently.pop()
+    store.mark_processing(build_id)
     
-    def process_in_background():
-        loop = None
+    async def process_build():
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            result = loop.run_until_complete(adapter.receive(data))
-            
+            result = await adapter.receive(data)
             print(f"\n[ANALYSIS] Build {result.build_id}:\nSeverity: {result.severity.upper()}\nError: {result.error_quote}\nExplanation: {result.explanation}")
             if result.fix_steps:
                 print(f"\nFix Steps:")
@@ -306,28 +340,25 @@ def webhook():
             print("="*60 + "\n")
         except Exception as e:
             print(f"[ERROR] Processing failed: {str(e)}")
+            store.log_failure(build_id, str(e), type(e).__name__)
         finally:
-            if loop:
-                try:
-                    time.sleep(0.5)
-                    pending = asyncio.all_tasks(loop)
-                    if pending:
-                        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-                    loop.run_until_complete(loop.shutdown_asyncgens())
-                    if not loop.is_closed():
-                        loop.close()
-                except:
-                    pass
-            time.sleep(1)
-            processed_recently.discard(build_id)
+            store.unmark_processing(build_id)
     
-    threading.Thread(target=process_in_background, daemon=True).start()
+    asyncio.run_coroutine_threadsafe(process_build(), loop)
     return jsonify({"status": "accepted", "build_id": build_id}), 202
 
 
 @app.route('/history', methods=['GET'])
 def get_history():
+    if not _check_auth():
+        return jsonify({"error": "Unauthorized"}), 401
     return jsonify({'total': store.get_history_count(), 'recent': store.get_recent_history()})
+
+@app.route('/metrics', methods=['GET'])
+def get_metrics():
+    if not _check_auth():
+        return jsonify({"error": "Unauthorized"}), 401
+    return jsonify(store.get_metrics())
 
 async def cli_mode():
     print(f"{'='*60}\nDevOps Log Analysis Agent - CLI Mode\n{'='*60}")
