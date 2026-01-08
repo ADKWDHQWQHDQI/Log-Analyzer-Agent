@@ -52,11 +52,13 @@ ollama serve
 ### 4. Run the Agent
 
 **Option 1: Using batch script (Windows)**
+
 ```cmd
 run_agent.bat --webhook
 ```
 
 **Option 2: Manual**
+
 ```cmd
 python devops_agent_maf.py --webhook
 ```
@@ -72,15 +74,19 @@ python devops_agent_maf.py --webhook
 ## Usage
 
 ### Webhook Mode (Production)
+
 ```bash
 python devops_agent_maf.py --webhook
 ```
+
 Starts Flask server with ngrok tunnel for Azure DevOps webhooks.
 
 ### CLI Mode (Testing)
+
 ```bash
 python devops_agent_maf.py --cli
 ```
+
 Interactive mode for manual log analysis.
 
 ## API Endpoints
@@ -149,17 +155,21 @@ Edit `devops_agent_maf.py` to customize:
 ## Troubleshooting
 
 **"Event loop is closed" error**
+
 - Fixed in latest version - event loop is now reused across requests
 
 **"WARNING: AZURE_DEVOPS_PAT not set"**
+
 - Ensure `.env` file exists with `AZURE_DEVOPS_PAT=your_pat`
 - Run `python-dotenv` is installed: `pip install python-dotenv`
 
 **Teams notification not sent**
+
 - Verify `TEAMS_WEBHOOK_URL` is set in `.env`
 - Test webhook URL manually with curl/Postman
 
 **Ollama connection failed**
+
 - Ensure Ollama is running: `ollama serve`
 - Verify model is pulled: `ollama pull llama3.2:3b`
 
