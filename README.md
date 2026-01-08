@@ -235,18 +235,22 @@ Edit `devops_agent_maf.py` to customize:
 **Critical Fixes**:
 
 1. **Time-Based Deduplication** - Replaced thread-unsafe global set with persistent SQLite `processing_queue` table
+
    - TTL-based (300s default), survives restarts
    - `is_recently_processed()`, `mark_processing()`, `unmark_processing()`
 
 2. **Parallel Log Fetching** - Removed sequential 3-log limit
+
    - Fetches ALL Container logs via `asyncio.gather()`
    - Concurrent API requests for 3-5x speed improvement
 
 3. **Retry Logic** - Exponential backoff for transient failures
+
    - Retries on 429, 5xx status codes
    - `_retry_request(url, headers, max_attempts=3)`
 
 4. **Error Tracking** - Persistent failure log for observability
+
    - `failure_log` table stores all exceptions
    - `/metrics` endpoint returns failure statistics
 
