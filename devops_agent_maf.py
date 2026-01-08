@@ -11,6 +11,7 @@ from semantic_kernel.functions import kernel_function
 from semantic_kernel.contents import ChatHistory
 from typing import Dict, List, Optional
 from datetime import datetime
+from dataclasses import dataclass, field
 import json
 from flask import Flask, request, jsonify
 from pyngrok import ngrok
@@ -18,8 +19,9 @@ import requests
 import os
 import base64
 from dotenv import load_dotenv
+import sqlite3
+from pathlib import Path
 
-# Load environment variables from .env file
 load_dotenv()
 
 # ------------------- Configuration -------------------
@@ -28,11 +30,9 @@ MODEL = "llama3.2:3b"
 AZURE_DEVOPS_ORG = "sandeepkuruva"
 AZURE_DEVOPS_PROJECT = "AI-Enhanced Productivity Metric Calculator"
 
-# Environment variables (REQUIRED - set before running)
 AZURE_DEVOPS_PAT = os.environ.get('AZURE_DEVOPS_PAT')
 TEAMS_WEBHOOK_URL = os.environ.get('TEAMS_WEBHOOK_URL')
 
-# Validate required environment variables
 if not AZURE_DEVOPS_PAT:
     print(" [WARNING] AZURE_DEVOPS_PAT not set. Log fetching will fail.")
     print("   Set it with: set AZURE_DEVOPS_PAT=your_pat_here")
@@ -42,7 +42,126 @@ if not TEAMS_WEBHOOK_URL:
     print("   Set it with: set TEAMS_WEBHOOK_URL=your_webhook_here")
 # ----------------------------------------------------
 
+
+# ============================================================================
+# DATA MODELS (Structured)
+# ============================================================================
+
+@dataclass
+class BuildEvent:
+    build_id: str
+    build_name: str
+    status: str
+    logs: str
+    timestamp: datetime
+    resource: dict = field(default_factory=dict)
+
+@dataclass
+class AnalysisResult:
+    build_id: str
+    build_name: str
+    status: str
+    error_quote: str
+    explanation: str
+    fix_steps: List[str]
+    severity: str
+    timestamp: datetime
+    
+    def to_dict(self) -> dict:
+        return {
+            "build_id": self.build_id,
+            "build_name": self.build_name,
+            "status": self.status,
+            "error_quote": self.error_quote,
+            "explanation": self.explanation,
+            "fix_steps": self.fix_steps,
+            "severity": self.severity,
+            "timestamp": self.timestamp.isoformat()
+        }
+
+
+# ============================================================================
+# PERSISTENCE LAYER
+# ============================================================================
+
+class BuildStore:
+    def __init__(self, db_path: str = "builds.db"):
+        self.db_path = db_path
+        self._init_db()
+    
+    def _init_db(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS processed_builds (
+                    build_id TEXT PRIMARY KEY,
+                    processed_at TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS build_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    build_id TEXT NOT NULL,
+                    build_name TEXT,
+                    status TEXT NOT NULL,
+                    error_quote TEXT,
+                    explanation TEXT,
+                    fix_steps TEXT,
+                    severity TEXT,
+                    timestamp TEXT NOT NULL,
+                    log_preview TEXT
+                )
+            """)
+            conn.commit()
+    
+    def is_processed(self, build_id: str) -> bool:
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("SELECT 1 FROM processed_builds WHERE build_id = ?", (build_id,))
+            return cursor.fetchone() is not None
+    
+    def mark_processed(self, build_id: str):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO processed_builds (build_id, processed_at) VALUES (?, ?)",
+                (build_id, datetime.now().isoformat())
+            )
+            conn.commit()
+    
+    def save_analysis(self, result: AnalysisResult, log_preview: str):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                INSERT INTO build_history 
+                (build_id, build_name, status, error_quote, explanation, fix_steps, severity, timestamp, log_preview)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                result.build_id,
+                result.build_name,
+                result.status,
+                result.error_quote,
+                result.explanation,
+                json.dumps(result.fix_steps),
+                result.severity,
+                result.timestamp.isoformat(),
+                log_preview
+            ))
+            conn.commit()
+    
+    def get_recent_history(self, limit: int = 10) -> List[dict]:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                "SELECT * FROM build_history ORDER BY id DESC LIMIT ?",
+                (limit,)
+            )
+            return [dict(row) for row in cursor.fetchall()]
+    
+    def get_history_count(self) -> int:
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("SELECT COUNT(*) FROM build_history")
+            return cursor.fetchone()[0]
+
+
 app = Flask(__name__)
+store = BuildStore()
 
 
 # ============================================================================
@@ -66,10 +185,9 @@ print(f"✓ SK + Ollama ({MODEL}) connected\n")
 # ============================================================================
 
 class DevOpsLogAgent:
-    def __init__(self, kernel: Kernel):
+    def __init__(self, kernel: Kernel, store: BuildStore):
         self.kernel = kernel
-        self.build_history: List[Dict] = []
-        self.processed_builds: set = set()
+        self.store = store
         
     async def _fetch_logs(self, build_id: str, resource: dict) -> str:
         logs_list_url = resource.get('logs', {}).get('url')
@@ -106,13 +224,22 @@ class DevOpsLogAgent:
             print(f"[ERROR] Log fetch exception: {str(e)}")
             return json.dumps(resource, indent=2)
     
-    async def _analyze_logs(self, status: str, log_text: str) -> str:
-        if status not in ['failed', 'partiallySucceeded']:
-            return "Build succeeded. No action required."
+    async def _analyze_logs(self, event: BuildEvent) -> AnalysisResult:
+        if event.status not in ['failed', 'partiallySucceeded']:
+            return AnalysisResult(
+                build_id=event.build_id,
+                build_name=event.build_name,
+                status=event.status,
+                error_quote="",
+                explanation="Build succeeded. No action required.",
+                fix_steps=[],
+                severity="success",
+                timestamp=event.timestamp
+            )
         
-        print(f"[SK-OLLAMA] Analyzing {len(log_text)} chars...")
+        print(f"[SK-OLLAMA] Analyzing {len(event.logs)} chars...")
         
-        log_snippet = log_text[-2000:] if len(log_text) > 2000 else log_text
+        log_snippet = event.logs[-2000:] if len(event.logs) > 2000 else event.logs
         
         prompt = f"""You are a DevOps expert analyzing Azure DevOps build failures.
 
@@ -120,13 +247,21 @@ RULES:
 1. Quote the EXACT error from the log
 2. Explain what it means (1-2 sentences)
 3. Provide 3 specific fix steps (copy-paste ready commands where possible)
-4. Keep under 150 words
+4. Classify severity: critical, high, medium, low
+5. Keep under 150 words
 
-Build Status: {status}
+Build Status: {event.status}
 Log:
 {log_snippet}
 
-Analysis:"""
+Return in format:
+ERROR: <exact error quote>
+EXPLANATION: <what it means>
+SEVERITY: <critical|high|medium|low>
+FIXES:
+1. <step 1>
+2. <step 2>
+3. <step 3>"""
         
         chat_history = ChatHistory()
         chat_history.add_user_message(prompt)
@@ -137,17 +272,58 @@ Analysis:"""
         )
         
         if response is None:
-            return "Error: No response from AI model"
+            return AnalysisResult(
+                build_id=event.build_id,
+                build_name=event.build_name,
+                status=event.status,
+                error_quote="",
+                explanation="Error: No response from AI model",
+                fix_steps=[],
+                severity="unknown",
+                timestamp=event.timestamp
+            )
         
-        analysis = str(response.content).strip()
-        print(f"[SK-OLLAMA] Generated {len(analysis)} chars\n")
-        return analysis
+        analysis_text = str(response.content).strip()
+        print(f"[SK-OLLAMA] Generated {len(analysis_text)} chars\n")
+        
+        error_quote = ""
+        explanation = ""
+        severity = "medium"
+        fix_steps = []
+        
+        for line in analysis_text.split('\n'):
+            line = line.strip()
+            if line.startswith('ERROR:'):
+                error_quote = line.replace('ERROR:', '').strip()
+            elif line.startswith('EXPLANATION:'):
+                explanation = line.replace('EXPLANATION:', '').strip()
+            elif line.startswith('SEVERITY:'):
+                severity = line.replace('SEVERITY:', '').strip().lower()
+            elif line and line[0].isdigit() and '.' in line[:3]:
+                fix_steps.append(line[line.index('.')+1:].strip())
+        
+        if not explanation:
+            explanation = analysis_text
+        
+        return AnalysisResult(
+            build_id=event.build_id,
+            build_name=event.build_name,
+            status=event.status,
+            error_quote=error_quote,
+            explanation=explanation,
+            fix_steps=fix_steps,
+            severity=severity,
+            timestamp=event.timestamp
+        )
     
-    async def _send_teams_notification(self, build_id: str, build_name: str, status: str, analysis: str):
-        if 'Build succeeded' in analysis or not TEAMS_WEBHOOK_URL:
+    async def _send_teams_notification(self, result: AnalysisResult):
+        if result.severity == "success" or not TEAMS_WEBHOOK_URL:
             return
         
-        print(f"[TEAMS] Sending notification for build {build_id}...")
+        print(f"[TEAMS] Sending notification for build {result.build_id}...")
+        
+        fix_steps_text = "\n".join([f"{i+1}. {step}" for i, step in enumerate(result.fix_steps)])
+        analysis_text = f"**Error:** {result.error_quote}\n\n**Explanation:** {result.explanation}\n\n**Fixes:**\n{fix_steps_text}"
         
         teams_payload = {
             "type": "message",
@@ -160,20 +336,20 @@ Analysis:"""
                     "body": [
                         {
                             "type": "TextBlock",
-                            "text": f"🔴 Build Failure: {build_name}",
+                            "text": f"🔴 Build Failure: {result.build_name}",
                             "weight": "bolder",
                             "size": "medium",
                             "color": "attention"
                         },
                         {
                             "type": "TextBlock",
-                            "text": f"Build ID: {build_id} | Status: {status}",
+                            "text": f"Build ID: {result.build_id} | Status: {result.status} | Severity: {result.severity.upper()}",
                             "isSubtle": True,
                             "spacing": "small"
                         },
                         {
                             "type": "TextBlock",
-                            "text": f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                            "text": f"Timestamp: {result.timestamp.strftime('%Y-%m-%d %H:%M:%S')}",
                             "isSubtle": True,
                             "spacing": "small"
                         },
@@ -185,7 +361,7 @@ Analysis:"""
                         },
                         {
                             "type": "TextBlock",
-                            "text": str(analysis),
+                            "text": analysis_text,
                             "wrap": True,
                             "spacing": "small"
                         }
@@ -193,7 +369,7 @@ Analysis:"""
                     "actions": [{
                         "type": "Action.OpenUrl",
                         "title": "View Build",
-                        "url": f"https://dev.azure.com/{AZURE_DEVOPS_ORG}/{AZURE_DEVOPS_PROJECT}/_build/results?buildId={build_id}"
+                        "url": f"https://dev.azure.com/{AZURE_DEVOPS_ORG}/{AZURE_DEVOPS_PROJECT}/_build/results?buildId={result.build_id}"
                     }]
                 }
             }]
@@ -208,48 +384,79 @@ Analysis:"""
         except Exception as e:
             print(f"[TEAMS] ✗ Notification exception: {str(e)}")
     
-    async def handle(self, data: dict) -> dict:
+    async def handle(self, event: BuildEvent) -> AnalysisResult:
+        if event.status not in ['failed', 'partiallySucceeded']:
+            print(f"[SKIP] Build {event.build_id} - status: {event.status} (not a failure)\n")
+            return AnalysisResult(
+                build_id=event.build_id,
+                build_name=event.build_name,
+                status=event.status,
+                error_quote="",
+                explanation=f"Build {event.status}, no analysis needed",
+                fix_steps=[],
+                severity="ignored",
+                timestamp=event.timestamp
+            )
+        
+        if self.store.is_processed(event.build_id):
+            print(f"[SKIP] Build {event.build_id} already processed\n")
+            return AnalysisResult(
+                build_id=event.build_id,
+                build_name=event.build_name,
+                status=event.status,
+                error_quote="",
+                explanation="Duplicate - already processed",
+                fix_steps=[],
+                severity="duplicate",
+                timestamp=event.timestamp
+            )
+        
+        self.store.mark_processed(event.build_id)
+        
+        result = await self._analyze_logs(event)
+        self.store.save_analysis(result, event.logs[:200])
+        
+        await self._send_teams_notification(result)
+        
+        return result
+
+
+# ============================================================================
+# TRANSPORT ADAPTER (Framework-Agnostic)
+# ============================================================================
+
+class FlaskAdapter:
+    def __init__(self, agent: DevOpsLogAgent):
+        self.agent = agent
+    
+    @staticmethod
+    def parse_webhook(data: dict) -> BuildEvent:
         resource = data.get('resource', {})
-        status = resource.get('result', resource.get('status', 'unknown'))
         build_id = str(resource.get('id', 'unknown'))
         build_name = resource.get('definition', {}).get('name', 'Unknown Build')
+        status = resource.get('result', resource.get('status', 'unknown'))
         
-        if status not in ['failed', 'partiallySucceeded']:
-            print(f"[SKIP] Build {build_id} - status: {status} (not a failure)\n")
-            return {"status": "ignored", "reason": f"Build {status}, no analysis needed"}
+        return BuildEvent(
+            build_id=build_id,
+            build_name=build_name,
+            status=status,
+            logs="",
+            timestamp=datetime.now(),
+            resource=resource
+        )
+    
+    async def receive(self, data: dict) -> AnalysisResult:
+        event = self.parse_webhook(data)
         
-        if build_id in self.processed_builds:
-            print(f"[SKIP] Build {build_id} already processed\n")
-            return {"status": "skipped", "reason": "duplicate"}
+        print(f"[LOG FETCH] Retrieving full logs for build {event.build_id}...")
+        event.logs = await self.agent._fetch_logs(event.build_id, event.resource)
+        print(f"[LOG FETCH] Total log content: {len(event.logs)} chars")
         
-        self.processed_builds.add(build_id)
-        
-        print(f"[LOG FETCH] Retrieving full logs for build {build_id}...")
-        log_text = await self._fetch_logs(build_id, resource)
-        print(f"[LOG FETCH] Total log content: {len(log_text)} chars")
-        
-        self.build_history.append({
-            "id": build_id,
-            "name": build_name,
-            "status": status,
-            "timestamp": datetime.now().isoformat(),
-            "log_preview": log_text[:200]
-        })
-        
-        analysis = await self._analyze_logs(status, log_text)
-        await self._send_teams_notification(build_id, build_name, status, analysis)
-        
-        return {
-            "build_id": build_id,
-            "build_name": build_name,
-            "status": status,
-            "analysis": str(analysis),
-            "history_count": len(self.build_history),
-            "teams_notified": bool(TEAMS_WEBHOOK_URL)
-        }
+        return await self.agent.handle(event)
 
 
-agent = DevOpsLogAgent(kernel)
+agent = DevOpsLogAgent(kernel, store)
+adapter = FlaskAdapter(agent)
 print("DevOps Log Analysis Agent ready!\n")
 
 
@@ -263,7 +470,7 @@ def home():
         'status': 'alive',
         'agent': 'DevOps-Log-Agent',
         'model': MODEL,
-        'builds_processed': len(agent.build_history)
+        'builds_processed': store.get_history_count()
     })
 
 
@@ -284,21 +491,22 @@ def webhook():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
     
-    response = loop.run_until_complete(agent.handle(data))
+    result = loop.run_until_complete(adapter.receive(data))
     
-    if 'analysis' in response:
-        print(f"\n[ANALYSIS] Build {response['build_id']}:")
-        print(response['analysis'])
-        print("="*60 + "\n")
+    print(f"\n[ANALYSIS] Build {result.build_id}:")
+    print(f"Error: {result.error_quote}")
+    print(f"Severity: {result.severity}")
+    print(f"Explanation: {result.explanation}")
+    print("="*60 + "\n")
     
-    return jsonify(response), 200
+    return jsonify(result.to_dict()), 200
 
 
 @app.route('/history', methods=['GET'])
 def get_history():
     return jsonify({
-        'total': len(agent.build_history),
-        'recent': agent.build_history[-10:]
+        'total': store.get_history_count(),
+        'recent': store.get_recent_history()
     })
 
 
@@ -320,20 +528,27 @@ async def cli_mode():
             break
         
         status = input("Status (failed/succeeded): ").strip() or "failed"
+        build_name = input("Build name (optional): ").strip() or "CLI Test Build"
         
-        mock_data = {
-            'resource': {
-                'id': f'cli-{datetime.now().timestamp()}',
-                'result': status,
-                'definition': {'name': 'CLI Test Build'}
-            },
-            'detailedMessage': {'text': log_text}
-        }
+        event = BuildEvent(
+            build_id=f'cli-{datetime.now().timestamp()}',
+            build_name=build_name,
+            status=status,
+            logs=log_text,
+            timestamp=datetime.now(),
+            resource={}
+        )
         
-        response = await agent.handle(mock_data)
+        result = await agent.handle(event)
         print("\n" + "="*60)
         print("ANALYSIS:")
-        print(response.get('analysis', response.get('reason', 'No analysis')))
+        print(f"Error: {result.error_quote}")
+        print(f"Severity: {result.severity}")
+        print(f"Explanation: {result.explanation}")
+        if result.fix_steps:
+            print("Fix Steps:")
+            for i, step in enumerate(result.fix_steps, 1):
+                print(f"  {i}. {step}")
         print("="*60)
 
 
