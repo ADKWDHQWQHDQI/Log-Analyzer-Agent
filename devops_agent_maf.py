@@ -145,33 +145,28 @@ class DevOpsLogAgent:
         
         prompt = f"""You are a DevOps expert analyzing Azure DevOps build failures.
 
-Analyze this build failure and provide a structured response.
+Analyze the build log carefully and identify the root cause of the failure.
+
+INSTRUCTIONS:
+1. Read through the entire log to find what actually caused the build to fail
+2. Quote the EXACT error line from the log (word-for-word)
+3. Explain what caused the failure in 1-2 sentences
+4. Provide 3 specific, actionable fix steps
+5. Classify severity: critical (build completely blocked), high (major issue), medium (needs fix)
 
 Build Status: {event.status}
-Log:
+
+Build Log:
 {log_snippet}
 
-Provide your analysis in this EXACT format:
-
-SEVERITY: [critical/high/medium/low]
-- critical: Production-blocking, security issues, data loss
-- high: Build completely broken, major functionality impaired
-- medium: Partial failures, workarounds available
-- low: Minor issues, warnings, cosmetic problems
-
-ERROR:
-[Quote the exact error message(s) from the log - be concise, 1-2 lines max]
-
-EXPLANATION:
-[Explain what went wrong in 2-3 sentences]
-
-FIX_STEPS:
-1. [First specific, actionable fix step with commands if applicable]
-2. [Second specific fix step]
-3. [Third specific fix step]
-
-Analysis:"""
-        
+Return in EXACT format:
+ERROR: <exact error line from log>
+EXPLANATION: <root cause in 1-2 sentences>
+SEVERITY: <critical|high|medium|low>
+FIXES:
+1. <specific action step 1>
+2. <specific action step 2>
+3. <specific action step 3>"""
         chat_history = ChatHistory()
         chat_history.add_user_message(prompt)
         

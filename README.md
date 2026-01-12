@@ -4,19 +4,19 @@ AI-powered agent that analyzes Azure DevOps build failures and sends actionable 
 
 ## Features
 
-- 🤖 **AI-Powered Analysis**: Uses Semantic Kernel + Ollama (Llama 3.2) for intelligent log analysis with structured output parsing
-- 🔍 **Full Log Fetching**: Retrieves complete build logs from Azure DevOps REST API with parallel fetching
-- 📢 **Teams Notifications**: Sends rich Adaptive Cards with severity indicators (🔴🟠🟡🟢) to Teams channels
-- 🎯 **Smart Filtering**: Only analyzes failures, skips successful builds
-- 🔄 **Time-Based Deduplication**: Persistent SQLite-backed TTL deduplication (5-minute window)
-- 📝 **Build History**: Tracks all processed builds with SQLite persistence
-- 🎚️ **LLM-Driven Severity**: Dynamic severity classification (critical/high/medium/low) based on impact
-- 🔧 **Actionable Fix Steps**: Extracts and presents 3-5 specific, copy-paste-ready fix steps
-- 🎨 **Structured Output**: Regex-based parsing extracts error quotes, explanations, and fix steps
-- ⚡ **Optimized Codebase**: Reduced from 660 to ~380 lines while maintaining full functionality
-- 🔁 **Retry Logic**: Exponential backoff for Azure DevOps API calls (handles 429, 5xx errors)
-- 📊 **Error Tracking**: Persistent failure log with `/metrics` endpoint for observability
-- 🔐 **Optional Authentication**: Bearer token or query param auth for all endpoints
+- **AI-Powered Analysis**: Uses Semantic Kernel + Ollama (Llama 3.2) for intelligent log analysis with structured output parsing
+- **Full Log Fetching**: Retrieves complete build logs from Azure DevOps REST API with parallel fetching
+- **Teams Notifications**: Sends rich Adaptive Cards with severity indicators to Teams channels
+- **Smart Filtering**: Only analyzes failures, skips successful builds
+- **Time-Based Deduplication**: Persistent SQLite-backed TTL deduplication (5-minute window)
+- **Build History**: Tracks all processed builds with SQLite persistence
+- **LLM-Driven Severity**: Dynamic severity classification (critical/high/medium/low) based on impact
+- **Actionable Fix Steps**: Extracts and presents 3-5 specific, copy-paste-ready fix steps
+- **Structured Output**: Regex-based parsing extracts error quotes, explanations, and fix steps
+- **Optimized Codebase**: Reduced from 660 to ~380 lines while maintaining full functionality
+- **Retry Logic**: Exponential backoff for Azure DevOps API calls (handles 429, 5xx errors)
+- **Error Tracking**: Persistent failure log with `/metrics` endpoint for observability
+- **Optional Authentication**: Bearer token or query param auth for all endpoints
 
 ## Architecture
 
@@ -137,10 +137,10 @@ The agent provides structured analysis in this format:
 
 **Severity Classification** (LLM-driven):
 
-- 🔴 **Critical**: Production-blocking, security issues, data loss
-- 🟠 **High**: Build completely broken, major functionality impaired
-- 🟡 **Medium**: Partial failures, workarounds available
-- 🟢 **Low**: Minor issues, warnings, cosmetic problems
+- **Critical**: Production-blocking, security issues, data loss
+- **High**: Build completely broken, major functionality impaired
+- **Medium**: Partial failures, workarounds available
+- **Low**: Minor issues, warnings, cosmetic problems
 
 **Output Components**:
 
@@ -151,7 +151,7 @@ The agent provides structured analysis in this format:
 ## Sample Teams Notification
 
 ```
-� Build Failure: MyProject-CI
+Build Failure: MyProject-CI
 Build ID: 52 | Status: failed | Severity: HIGH
 Timestamp: 2026-01-08 15:27:56
 
@@ -180,16 +180,16 @@ Edit `devops_agent_maf.py` to customize:
 
 ## Security
 
-- ✅ Credentials stored in `.env` (gitignored)
-- ✅ PAT requires only Build (Read) permissions
-- ✅ Environment variables validated on startup
-- ✅ No hardcoded secrets in code
+- Credentials stored in `.env` (gitignored)
+- PAT requires only Build (Read) permissions
+- Environment variables validated on startup
+- No hardcoded secrets in code
 
 ## Troubleshooting
 
 **"Event loop is closed" error**
 
-- ✅ Fixed in v2.0 - Proper async cleanup with shutdown_asyncgens() and graceful thread handling
+- Fixed in v2.0 - Proper async cleanup with shutdown_asyncgens() and graceful thread handling
 
 **"WARNING: AZURE_DEVOPS_PAT not set"**
 
@@ -215,7 +215,7 @@ Edit `devops_agent_maf.py` to customize:
 
 **Duplicate webhook processing**
 
-- ✅ Now handled by two-tier deduplication (in-memory + persistent store)
+- Now handled by two-tier deduplication (in-memory + persistent store)
 - Old builds are skipped automatically even after server restart
 
 ## Tech Stack
@@ -260,13 +260,13 @@ Edit `devops_agent_maf.py` to customize:
 
 ### v2.0 AI & Optimization
 
-- ✅ **LLM-driven severity classification** - Removed hardcoded severity levels
-- ✅ **Populated fix_steps** - Extracts actionable remediation steps from LLM response
-- ✅ **Enhanced error extraction** - Regex patterns for common error formats
-- ✅ **Store-backed deduplication** - Persistent duplicate prevention across restarts
-- ✅ **Code optimization** - Reduced from 660 to ~380 lines (42% reduction)
-- ✅ **Fixed event loop closure** - Proper async cleanup prevents RuntimeError
-- ✅ **Improved Teams cards** - Severity icons, structured sections, better formatting
+- **LLM-driven severity classification** - Removed hardcoded severity levels
+- **Populated fix_steps** - Extracts actionable remediation steps from LLM response
+- **Enhanced error extraction** - Regex patterns for common error formats
+- **Store-backed deduplication** - Persistent duplicate prevention across restarts
+- **Code optimization** - Reduced from 660 to ~380 lines (42% reduction)
+- **Fixed event loop closure** - Proper async cleanup prevents RuntimeError
+- **Improved Teams cards** - Severity icons, structured sections, better formatting
 
 ## License
 
